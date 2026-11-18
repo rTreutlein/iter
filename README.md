@@ -2,6 +2,17 @@
 
 Run from the repository directory with Python 3.
 
+## Use a Claude subscription
+
+With Claude Code installed, sign in once with your subscription account and start Iter:
+
+```bash
+claude auth login
+ITER_BACKEND=claude python3 iter.py
+```
+
+If already signed in, skip the login command. Set `CLAUDE_MODEL` to select a model or leave it unset for the CLI default. Each step, including autonomous work, sends Iter’s assembled conversation, memory, and tool definitions to Claude Code. Iter runs the selected tools locally. Press Ctrl+C to stop. [Claude Code authentication](https://code.claude.com/docs/en/authentication)
+
 ## Use a Codex subscription
 
 Install the Codex CLI, then run the following from the repository directory:

@@ -256,11 +256,15 @@ if BACKEND == "codex":
     if not shutil.which("codex"):
         sys.exit("Install the Codex CLI and run codex login to use ITER_BACKEND=codex.")
     MODEL = os.getenv("CODEX_MODEL")
+elif BACKEND == "claude":
+    from claude_backend import check_login, next_message
+    check_login()
+    MODEL = os.getenv("CLAUDE_MODEL")
 elif BACKEND == "openai":
     import openai
     client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=LLM_TIMEOUT, max_retries=0, default_headers={"X-APC-Tenant": "iter", "x-session-id": SESSION_ID})
 else:
-    sys.exit(f"Unknown ITER_BACKEND {BACKEND!r}. Choose openai or codex.")
+    sys.exit(f"Unknown ITER_BACKEND {BACKEND!r}. Choose openai, codex, or claude.")
 time.sleep(INIT_WAIT)
 Path("memory").mkdir(exist_ok=True)
 Path("skills").mkdir(exist_ok=True)
@@ -268,7 +272,7 @@ Path("transformations").mkdir(exist_ok=True)
 post_task_mode, autonomous_steps, new_burst, pending_event_append = False, 0, True, ""
 cleanup_interval = MAX_EXPERIENCE_SIZE - RETAIN_EXPERIENCE_SIZE
 cleanup_bucket = len(experience) // cleanup_interval
-log.header(MODEL or "Codex default", SESSION_ID, len(experience))
+log.header(MODEL or f"{BACKEND.title()} default", SESSION_ID, len(experience))
 while True:
     current_bucket = len(experience) // cleanup_interval
     if current_bucket > cleanup_bucket:
@@ -346,7 +350,7 @@ while True:
             started = time.monotonic()
             usage = None
             finish_reason = None
-            if BACKEND == "codex":
+            if BACKEND in ("codex", "claude"):
                 message = next_message(request_messages, request_tools, MODEL, LLM_TIMEOUT)
             else:
                 response = client.chat.completions.create(model=MODEL, messages=request_messages, tools=request_tools, tool_choice=TOOL_CHOICE, max_tokens=MAX_TOKENS, extra_body={ "enable_thinking": True})
