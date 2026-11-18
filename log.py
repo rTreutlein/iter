@@ -943,19 +943,14 @@ def llm_start():
     _append("INFER", "Generating tool calls", "violet")
 
 
-def llm_complete(duration, response):
+def llm_complete(duration, usage, calls):
     _phase("READY")
-    usage = getattr(response, "usage", None)
     tokens = ""
     if usage is not None:
         in_tokens = getattr(usage, "prompt_tokens", None)
         out_tokens = getattr(usage, "completion_tokens", None)
         if in_tokens is not None or out_tokens is not None:
             tokens = f" · tokens {in_tokens or '?'}→{out_tokens or '?'}"
-    try:
-        calls = len(response.choices[0].message.tool_calls or [])
-    except (AttributeError, IndexError, TypeError):
-        calls = 0
     _append("LLM ✓", f"{duration:.1f}s{tokens} · {calls} tool call(s)", "blue")
 
 

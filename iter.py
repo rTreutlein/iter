@@ -3,7 +3,6 @@ import inspect
 import json
 import os
 import sys
-import openai
 import time
 import importlib.util
 import signal
@@ -42,6 +41,7 @@ MAX_SKILLS = int(os.getenv("MAX_SKILLS", "30"))
 MAX_CONTEXT_TRANSFORMATIONS = int(os.getenv("MAX_CONTEXT_TRANSFORMATIONS", "30"))
 MAX_TOOL_DESCRIPTION_CHARS = int(os.getenv("MAX_TOOL_DESCRIPTION_CHARS", "500"))
 DYNAMIC_TIMEOUT = float(os.getenv("DYNAMIC_TIMEOUT", "5"))
+BACKEND = os.getenv("ITER_BACKEND", "openai")
 MODEL = os.getenv("LLM_MODEL", "mlx-community/gemma-4-26b-a4b-it-4bit")
 BASE_URL = os.getenv("BASE_URL", "http://192.168.64.1:2277/v1")
 API_KEY = os.getenv("AI_API_KEY", "dummy")
@@ -250,7 +250,17 @@ try:
 except FileNotFoundError:
     experience = []
 SESSION_ID = str(uuid.uuid4())
-client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=LLM_TIMEOUT, max_retries=0, default_headers={"X-APC-Tenant": "iter", "x-session-id": SESSION_ID})
+if BACKEND == "codex":
+    from codex_backend import next_message
+    import shutil
+    if not shutil.which("codex"):
+        sys.exit("Install the Codex CLI and run codex login to use ITER_BACKEND=codex.")
+    MODEL = os.getenv("CODEX_MODEL")
+elif BACKEND == "openai":
+    import openai
+    client = openai.OpenAI(api_key=API_KEY, base_url=BASE_URL, timeout=LLM_TIMEOUT, max_retries=0, default_headers={"X-APC-Tenant": "iter", "x-session-id": SESSION_ID})
+else:
+    sys.exit(f"Unknown ITER_BACKEND {BACKEND!r}. Choose openai or codex.")
 time.sleep(INIT_WAIT)
 Path("memory").mkdir(exist_ok=True)
 Path("skills").mkdir(exist_ok=True)
@@ -258,7 +268,7 @@ Path("transformations").mkdir(exist_ok=True)
 post_task_mode, autonomous_steps, new_burst, pending_event_append = False, 0, True, ""
 cleanup_interval = MAX_EXPERIENCE_SIZE - RETAIN_EXPERIENCE_SIZE
 cleanup_bucket = len(experience) // cleanup_interval
-log.header(MODEL, SESSION_ID, len(experience))
+log.header(MODEL or "Codex default", SESSION_ID, len(experience))
 while True:
     current_bucket = len(experience) // cleanup_interval
     if current_bucket > cleanup_bucket:
@@ -334,28 +344,38 @@ while True:
                 request_messages += [{"role": "user", "content": transformation_error}]
             log.llm_start()
             started = time.monotonic()
-            response = client.chat.completions.create(model=MODEL, messages=request_messages, tools=request_tools, tool_choice=TOOL_CHOICE, max_tokens=MAX_TOKENS, extra_body={ "enable_thinking": True})
-            log.llm_complete(time.monotonic() - started, response)
-            message = response.choices[0].message
-            if message.content:
-                message.content += "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]"
-            if message.tool_calls:
-                message.tool_calls = message.tool_calls[:MAX_TOOL_CALLS]
+            usage = None
+            finish_reason = None
+            if BACKEND == "codex":
+                message = next_message(request_messages, request_tools, MODEL, LLM_TIMEOUT)
+            else:
+                response = client.chat.completions.create(model=MODEL, messages=request_messages, tools=request_tools, tool_choice=TOOL_CHOICE, max_tokens=MAX_TOKENS, extra_body={ "enable_thinking": True})
+                choice = response.choices[0]
+                message = choice.message.model_dump(exclude_none=True)
+                usage = response.usage
+                finish_reason = choice.finish_reason
+            calls = message.get("tool_calls") or []
+            log.llm_complete(time.monotonic() - started, usage, len(calls))
+            if message.get("content"):
+                message["content"] += "\n[NOT DELIVERED TO ANY CHANNEL. IF THIS WAS INTENDED AS COMMUNICATION, USE send.]"
+            if calls:
+                calls = calls[:MAX_TOOL_CALLS]
+                message["tool_calls"] = calls
                 break
-            if response.choices[0].finish_reason == "length":
+            if finish_reason == "length":
                 log.retry("Output token limit reached without a tool call")
                 retry_message = [{"role": "user", "content": "[OUTPUT TOKEN LIMIT REACHED. CALL THE REQUIRED TOOL CONCISELY.]"}]
             else:
                 log.retry("No tool call returned; requesting one")
-                retry_message = [{"role": "user", "content": f"[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: {message.content!r}]"}]
-        experience += [{key: value for key, value in message.model_dump(exclude_none=True).items() if KEEP_REASONING_IN_EPISODE or key not in ("reasoning", "reasoning_details", "reasoning_content")}]
-        for tool_call in message.tool_calls:
-            tool_name = tool_call.function.name
+                retry_message = [{"role": "user", "content": f"[YOUR PREVIOUS RESPONSE CONTAINED NO TOOL CALL AND WAS NOT DELIVERED. CALL AT LEAST ONE TOOL NOW. IF YOU INTENDED THIS CONTENT AS COMMUNICATION, USE send: {message.get('content')!r}]"}]
+        experience += [{key: value for key, value in message.items() if KEEP_REASONING_IN_EPISODE or key not in ("reasoning", "reasoning_details", "reasoning_content")}]
+        for tool_call in calls:
+            tool_name = tool_call["function"]["name"]
             failed = False
             try:
-                tool_arguments = json.loads(tool_call.function.arguments)
+                tool_arguments = json.loads(tool_call["function"]["arguments"])
             except json.JSONDecodeError as error:
-                tool_arguments = tool_call.function.arguments
+                tool_arguments = tool_call["function"]["arguments"]
                 ret = f"Invalid tool arguments from model: {error}"
                 failed = True
             else:
@@ -376,12 +396,12 @@ while True:
             ret = str(ret)
             if len(ret) > MAX_TOOL_OUTPUT_CHARS:
                 ret = ret[:MAX_TOOL_OUTPUT_CHARS] + " [TRUNCATED]"
-            experience += [{"role": "tool", "tool_call_id": tool_call.id, "content": "Step " + get_current_time() + ": " + ret}]
+            experience += [{"role": "tool", "tool_call_id": tool_call["id"], "content": "Step " + get_current_time() + ": " + ret}]
             log.tool_call(tool_name, tool_arguments, ret, failed)
         history_checkpoint = len(experience) #tool calls succeeded, even on later exception we won't unroll them
         save_experience(experience)
         autonomous_steps = 0 if event_append else autonomous_steps + 1
-        called_nop = any(call.function.name == "nop" for call in message.tool_calls)
+        called_nop = any(call["function"]["name"] == "nop" for call in calls)
         if called_nop:
             new_burst, autonomous_steps = True, 0
             pending_event_append = slow_wait_for_input()
